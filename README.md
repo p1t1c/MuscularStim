@@ -213,10 +213,3 @@ Then open your browser at `http://localhost:8000`
 - Test on resistor/LED before real applications
 - Ensure OPA541 circuit is correctly connected
 
-## License
-
-This code is for educational and testing purposes only.
-
-## Author
-
-Muscle Stimulator Control Project - Denervation Protocol
