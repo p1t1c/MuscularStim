@@ -67,12 +67,22 @@ function App() {
     const [stimulating, setStimulating] = useState(false);
     const [ports, setPorts] = useState([]);
     const [selectedPort, setSelectedPort] = useState('COM3');
-    const [durata, setDurata] = useState(50);
-    const [pauza, setPauza] = useState(1500);
+
+    // Burst mode parameters
+    const [pulseDuration, setPulseDuration] = useState(200);      // 200 ms
+    const [waitTime, setWaitTime] = useState(500);                 // 500 ms
+    const [burstDuration, setBurstDuration] = useState(8000);     // 8 seconds
+    const [restDuration, setRestDuration] = useState(16000);      // 16 seconds
+
     const [logs, setLogs] = useState([]);
     const [isPulsing, setIsPulsing] = useState(false);
+    const [inBurst, setInBurst] = useState(false);
+    const [scopeData, setScopeData] = useState([]);
+    const [phaseTimer, setPhaseTimer] = useState(0);
 
     const socketRef = useRef(null);
+    const canvasRef = useRef(null);
+    const phaseStartTimeRef = useRef(0);
 
     // Initialize Socket.IO connection
     useEffect(() => {
@@ -89,15 +99,39 @@ function App() {
             } else if (data.status === 'OPRIT') {
                 setStimulating(false);
                 setIsPulsing(false);
+                setInBurst(false);
+            }
+        });
+
+        socketRef.current.on('burst_event', (data) => {
+            if (data.event === 'BURST:START') {
+                setInBurst(true);
+                phaseStartTimeRef.current = Date.now();
+                addLog('Burst started - 8 seconds of pulses');
+            } else if (data.event === 'BURST:END') {
+                setInBurst(false);
+                setIsPulsing(false);
+                addLog('Burst ended - entering rest period');
+            } else if (data.event === 'REST:START') {
+                phaseStartTimeRef.current = Date.now();
+                addLog('Rest period - 16 seconds pause');
+            } else if (data.event === 'REST:END') {
+                addLog('Rest ended - starting new burst');
             }
         });
 
         socketRef.current.on('param_confirm', (data) => {
-            addLog(`✓ ${data.type === 'durata' ? 'Durată' : 'Pauză'} setată: ${data.value} ms`);
+            const paramNames = {
+                'puls': 'Pulse Duration',
+                'wait': 'Wait Time',
+                'burst': 'Burst Duration',
+                'rest': 'Rest Duration'
+            };
+            addLog(`${paramNames[data.type] || data.type} set to: ${data.value} ms`);
         });
 
         socketRef.current.on('system_ready', () => {
-            addLog('✓ Arduino gata!');
+            addLog('Arduino ready - BURST MODE');
         });
 
         socketRef.current.on('log_message', (data) => {
@@ -105,7 +139,7 @@ function App() {
         });
 
         socketRef.current.on('error', (data) => {
-            addLog(`❌ Eroare: ${data.message}`);
+            addLog(`Error: ${data.message}`);
         });
 
         // Load available ports on mount
@@ -119,17 +153,127 @@ function App() {
         // eslint-disable-next-line
     }, []);
 
-    // Pulse animation when stimulating
+    // Pulse animation when stimulating AND in burst
+    useEffect(() => {
+        if (stimulating && inBurst) {
+            const interval = setInterval(() => {
+                setIsPulsing(true);
+                setTimeout(() => setIsPulsing(false), pulseDuration);
+            }, pulseDuration + waitTime);
+
+            return () => {
+                clearInterval(interval);
+                setIsPulsing(false);
+            };
+        } else {
+            // Ensure pulse is stopped when not in burst or not stimulating
+            setIsPulsing(false);
+        }
+    }, [stimulating, inBurst, pulseDuration, waitTime]);
+
+    // Oscilloscope data collection
     useEffect(() => {
         if (stimulating) {
             const interval = setInterval(() => {
-                setIsPulsing(true);
-                setTimeout(() => setIsPulsing(false), durata);
-            }, durata + pauza);
+                const value = isPulsing ? 1 : 0;
+                setScopeData(prev => {
+                    const newData = [...prev, value];
+                    return newData.slice(-100); // Keep last 100 points
+                });
+            }, 50); // Update every 50ms
 
             return () => clearInterval(interval);
+        } else {
+            setScopeData([]);
         }
-    }, [stimulating, durata, pauza]);
+    }, [stimulating, isPulsing]);
+
+    // Set canvas size
+    useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+
+        const resizeCanvas = () => {
+            const rect = canvas.getBoundingClientRect();
+            canvas.width = rect.width;
+            canvas.height = rect.height;
+        };
+
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+        return () => window.removeEventListener('resize', resizeCanvas);
+    }, []);
+
+    // Timer countdown logic
+    useEffect(() => {
+        if (!stimulating) {
+            setPhaseTimer(0);
+            return;
+        }
+
+        const interval = setInterval(() => {
+            const elapsed = Date.now() - phaseStartTimeRef.current;
+            const totalDuration = inBurst ? burstDuration : restDuration;
+            const remaining = Math.max(0, Math.ceil((totalDuration - elapsed) / 1000));
+            setPhaseTimer(remaining);
+        }, 100);
+
+        return () => clearInterval(interval);
+    }, [stimulating, inBurst, burstDuration, restDuration]);
+
+    // Draw oscilloscope
+    useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+
+        const ctx = canvas.getContext('2d');
+        const width = canvas.width;
+        const height = canvas.height;
+
+        if (width === 0 || height === 0) return;
+
+        // Clear canvas
+        ctx.fillStyle = '#f8fafc';
+        ctx.fillRect(0, 0, width, height);
+
+        // Draw grid
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= 5; i++) {
+            const y = (height / 5) * i;
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(width, y);
+            ctx.stroke();
+        }
+
+        // Draw waveform
+        if (scopeData.length > 1) {
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+
+            const xStep = width / scopeData.length;
+            scopeData.forEach((value, index) => {
+                const x = index * xStep;
+                const y = height - (value * height * 0.8) - (height * 0.1);
+
+                if (index === 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+            });
+
+            ctx.stroke();
+        }
+
+        // Draw labels
+        ctx.fillStyle = '#64748b';
+        ctx.font = '10px monospace';
+        ctx.fillText('HIGH', 5, 15);
+        ctx.fillText('LOW', 5, height - 5);
+    }, [scopeData]);
 
     const addLog = (message) => {
         const timestamp = new Date().toLocaleTimeString('ro-RO');
@@ -218,27 +362,28 @@ function App() {
 
     const applyParameters = async () => {
         try {
-            // Set durata
-            await fetch(`${API_URL}/api/set-durata`, {
+            // Set all burst parameters
+            await fetch(`${API_URL}/api/set-burst-params`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({durata})
+                body: JSON.stringify({
+                    pulseDuration,
+                    waitTime,
+                    burstDuration,
+                    restDuration
+                })
             });
 
-            // Set pauza
-            await fetch(`${API_URL}/api/set-pauza`, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({pauza})
-            });
-
-            addLog('⚙ Parametri aplicați');
+            addLog('⚙ Burst parameters applied successfully');
         } catch (error) {
-            addLog(`❌ Eroare setare parametri: ${error.message}`);
+            addLog(`❌ Error setting parameters: ${error.message}`);
         }
     };
 
-    const frequency = (1000 / (durata + pauza)).toFixed(2);
+    // Calculate pulse frequency within burst
+    const pulseFrequency = (1000 / (pulseDuration + waitTime)).toFixed(2);
+    // Calculate number of pulses per burst
+    const pulsesPerBurst = Math.floor(burstDuration / (pulseDuration + waitTime));
 
     return (
         <div className="container">
@@ -334,46 +479,98 @@ function App() {
                         <div className="pulse-wave"></div>
                     </div>
 
+                    <div className="oscilloscope-container">
+                        {stimulating && (
+                            <div className="phase-timer-top">
+                                <span className={`phase-indicator ${inBurst ? 'burst' : 'rest'}`}>
+                                    {inBurst ? 'BURST' : 'REST'} - {phaseTimer}s
+                                </span>
+                            </div>
+                        )}
+                        <canvas
+                            ref={canvasRef}
+                            className="oscilloscope-canvas"
+                        />
+                    </div>
+
                     <div className="divider"></div>
 
                     <div className="section-group">
-                        <h2><Icons.Settings /> Pulse Parameters</h2>
+                        <h2><Icons.Settings /> Burst Parameters</h2>
 
                         <div className="param-control">
                             <label>
-                                Pulse Duration: <strong>{durata} ms</strong>
+                                Pulse Duration: <strong>{pulseDuration} ms</strong>
                             </label>
                             <input
                                 type="range"
-                                min="10"
-                                max="200"
-                                step="5"
-                                value={durata}
-                                onChange={(e) => setDurata(Number(e.target.value))}
+                                min="50"
+                                max="500"
+                                step="10"
+                                value={pulseDuration}
+                                onChange={(e) => setPulseDuration(Number(e.target.value))}
                                 disabled={!connected}
                             />
                             <div className="param-info">
-                                <span>10 ms</span>
-                                <span>200 ms</span>
+                                <span>50 ms</span>
+                                <span>500 ms</span>
                             </div>
                         </div>
 
                         <div className="param-control">
                             <label>
-                                Pause Between Pulses: <strong>{pauza} ms</strong>
+                                Wait Between Pulses: <strong>{waitTime} ms</strong>
                             </label>
                             <input
                                 type="range"
-                                min="500"
-                                max="5000"
-                                step="100"
-                                value={pauza}
-                                onChange={(e) => setPauza(Number(e.target.value))}
+                                min="100"
+                                max="2000"
+                                step="50"
+                                value={waitTime}
+                                onChange={(e) => setWaitTime(Number(e.target.value))}
                                 disabled={!connected}
                             />
                             <div className="param-info">
-                                <span>0.5 s</span>
-                                <span>5.0 s</span>
+                                <span>100 ms</span>
+                                <span>2000 ms</span>
+                            </div>
+                        </div>
+
+                        <div className="param-control">
+                            <label>
+                                Burst Duration: <strong>{(burstDuration / 1000).toFixed(1)} s</strong>
+                            </label>
+                            <input
+                                type="range"
+                                min="1000"
+                                max="30000"
+                                step="1000"
+                                value={burstDuration}
+                                onChange={(e) => setBurstDuration(Number(e.target.value))}
+                                disabled={!connected}
+                            />
+                            <div className="param-info">
+                                <span>1 s</span>
+                                <span>30 s</span>
+                            </div>
+                        </div>
+
+                        <div className="param-control">
+                            <label>
+                                Rest Duration: <strong>{(restDuration / 1000).toFixed(1)} s</strong>
+                            </label>
+                            <input
+                                type="range"
+                                min="5000"
+                                max="60000"
+                                step="1000"
+                                value={restDuration}
+                                onChange={(e) => setRestDuration(Number(e.target.value))}
+                                disabled={!connected}
+                            />
+                            <div className="param-info">
+                                <span>5 s</span>
+                                <span>60 s</span>
                             </div>
                         </div>
 
@@ -382,7 +579,7 @@ function App() {
                             disabled={!connected}
                             className="btn btn-primary btn-block"
                         >
-                            <Icons.Check /> Apply Parameters
+                            <Icons.Check /> Apply Burst Parameters
                         </button>
                     </div>
                 </section>
@@ -390,23 +587,31 @@ function App() {
                 {/* RIGHT COLUMN - Info & Logs */}
                 <section className="card">
                     <div className="section-group info-card">
-                        <h2><Icons.Chart /> Active Parameters</h2>
+                        <h2><Icons.Chart /> Burst Protocol Info</h2>
                         <div className="info-grid">
                             <div className="info-item">
-                                <span className="info-label">Duration</span>
-                                <span className="info-value">{durata} ms</span>
+                                <span className="info-label">Pulse</span>
+                                <span className="info-value">{pulseDuration} ms</span>
                             </div>
                             <div className="info-item">
-                                <span className="info-label">Pause</span>
-                                <span className="info-value">{pauza} ms</span>
+                                <span className="info-label">Wait</span>
+                                <span className="info-value">{waitTime} ms</span>
                             </div>
                             <div className="info-item">
-                                <span className="info-label">Frequency</span>
-                                <span className="info-value">~{frequency} Hz</span>
+                                <span className="info-label">Burst</span>
+                                <span className="info-value">{(burstDuration / 1000).toFixed(1)} s</span>
                             </div>
                             <div className="info-item">
-                                <span className="info-label">Full Cycle</span>
-                                <span className="info-value">{durata + pauza} ms</span>
+                                <span className="info-label">Rest</span>
+                                <span className="info-value">{(restDuration / 1000).toFixed(1)} s</span>
+                            </div>
+                            <div className="info-item">
+                                <span className="info-label">Pulse Freq</span>
+                                <span className="info-value">~{pulseFrequency} Hz</span>
+                            </div>
+                            <div className="info-item">
+                                <span className="info-label">Pulses/Burst</span>
+                                <span className="info-value">{pulsesPerBurst}</span>
                             </div>
                         </div>
                     </div>

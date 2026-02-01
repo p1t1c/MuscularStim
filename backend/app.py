@@ -35,14 +35,22 @@ def read_serial():
                 if line.startswith("STATUS:"):
                     status = line.split(":")[1]
                     socketio.emit('status_update', {'status': status})
-                elif line.startswith("CONFIRM_DUR:"):
-                    durata = line.split(":")[1]
-                    socketio.emit('param_confirm', {'type': 'durata', 'value': durata})
-                elif line.startswith("CONFIRM_PAUZA:"):
-                    pauza = line.split(":")[1]
-                    socketio.emit('param_confirm', {'type': 'pauza', 'value': pauza})
-                elif line == "SISTEM_GATA":
-                    socketio.emit('system_ready', {'message': 'Arduino ready'})
+                elif line.startswith("CONFIRM_PULS:"):
+                    value = line.split(":")[1]
+                    socketio.emit('param_confirm', {'type': 'puls', 'value': value})
+                elif line.startswith("CONFIRM_WAIT:"):
+                    value = line.split(":")[1]
+                    socketio.emit('param_confirm', {'type': 'wait', 'value': value})
+                elif line.startswith("CONFIRM_BURST:"):
+                    value = line.split(":")[1]
+                    socketio.emit('param_confirm', {'type': 'burst', 'value': value})
+                elif line.startswith("CONFIRM_REST:"):
+                    value = line.split(":")[1]
+                    socketio.emit('param_confirm', {'type': 'rest', 'value': value})
+                elif line in ["BURST:START", "BURST:END", "REST:START", "REST:END"]:
+                    socketio.emit('burst_event', {'event': line})
+                elif line == "SISTEM_GATA" or line == "MODE:BURST":
+                    socketio.emit('system_ready', {'message': 'Arduino ready - BURST MODE'})
                 else:
                     # Send any other message as log
                     socketio.emit('log_message', {'message': line})
@@ -118,23 +126,34 @@ def stop_stimulation():
     """Stop stimulation"""
     return send_command_helper('STOP')
 
-@app.route('/api/set-durata', methods=['POST'])
-def set_durata():
-    """Set pulse duration"""
+@app.route('/api/set-burst-params', methods=['POST'])
+def set_burst_params():
+    """Set all burst mode parameters"""
     try:
         data = request.json
-        durata = data.get('durata', 50)
-        return send_command_helper(f'DUR:{durata}')
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        pulse_duration = data.get('pulseDuration', 200)
+        wait_time = data.get('waitTime', 500)
+        burst_duration = data.get('burstDuration', 8000)
+        rest_duration = data.get('restDuration', 16000)
 
-@app.route('/api/set-pauza', methods=['POST'])
-def set_pauza():
-    """Set pause duration"""
-    try:
-        data = request.json
-        pauza = data.get('pauza', 1500)
-        return send_command_helper(f'PAUZA:{pauza}')
+        # Send all parameters to Arduino
+        responses = []
+        commands = [
+            (f'PULS:{pulse_duration}', 'Pulse duration'),
+            (f'WAIT:{wait_time}', 'Wait time'),
+            (f'BURST:{burst_duration}', 'Burst duration'),
+            (f'REST:{rest_duration}', 'Rest duration')
+        ]
+
+        for command, desc in commands:
+            if arduino and arduino.is_open:
+                arduino.write(f'{command}\n'.encode('utf-8'))
+                time.sleep(0.1)
+                responses.append(f'{desc} set')
+            else:
+                return jsonify({'success': False, 'error': 'Not connected to Arduino'})
+
+        return jsonify({'success': True, 'message': 'All burst parameters set', 'details': responses})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
